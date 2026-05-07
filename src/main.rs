@@ -266,7 +266,8 @@ fn estimate_model_properties(model_id: &str) -> ModelProps {
         || lower.contains("r1")
         || lower.contains("k2")
         || lower.contains("o1")
-        || lower.contains("thinking");
+        || lower.contains("thinking")
+        || lower.contains("deepseek-v4");
 
     // Context window estimation by family
     let (ctx, max_ctx) = if lower.contains("gpt-5") {
@@ -535,7 +536,7 @@ mod tests {
         let props = estimate_model_properties("deepseek-v4-pro");
         assert_eq!(props.context_window, 262_144);
         assert_eq!(props.max_context_window, 1_048_576);
-        assert!(!props.supports_reasoning_summaries);
+        assert!(props.supports_reasoning_summaries);
         assert!(props.supports_parallel_tool_calls);
     }
 
