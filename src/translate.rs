@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 use crate::{session::SessionStore, types::*};
 
@@ -37,6 +38,27 @@ pub fn to_chat_request(req: &ResponsesRequest, history: Vec<ChatMessage>, sessio
             });
         }
         ResponsesInput::Messages(items) => {
+            // Collect call_ids already present in history (from previous_response_id).
+            // This prevents creating duplicate assistant-with-tool_calls messages
+            // when the input items replay function_call entries from prior output.
+            let existing_call_ids: HashSet<String> = messages.iter()
+                .flat_map(|msg| {
+                    let mut ids: Vec<String> = Vec::new();
+                    if let Some(tcs) = &msg.tool_calls {
+                        ids.extend(tcs.iter()
+                            .filter_map(|tc| tc.get("id").and_then(|v| v.as_str()).map(String::from)));
+                    }
+                    ids.extend(msg.tool_call_id.iter().cloned());
+                    ids
+                })
+                .collect();
+
+            // For function_call_output dedup, only skip if a tool response
+            // already exists for the call_id (not just from assistant tool_calls).
+            let existing_tool_responses: HashSet<String> = messages.iter()
+                .filter_map(|msg| msg.tool_call_id.clone())
+                .collect();
+
             // Process items with index so we can group consecutive function_call
             // entries into a single assistant message. Providers require all tool
             // calls from one turn to live in one message with a tool_calls array.
@@ -46,6 +68,14 @@ pub fn to_chat_request(req: &ResponsesRequest, history: Vec<ChatMessage>, sessio
                 let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
                 if item_type == "function_call" {
+                    // Skip function_call items whose call_id already exists in history.
+                    // Duplicates occur when both previous_response_id and input replay
+                    // the same function_call entries from prior output.
+                    let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
+                    if existing_call_ids.contains(call_id) {
+                        i += 1;
+                        continue;
+                    }
                     // Collect this and all immediately following function_call items
                     // into one assistant message with multiple tool_calls entries.
                     let mut grouped: Vec<Value> = Vec::new();
@@ -87,6 +117,12 @@ pub fn to_chat_request(req: &ResponsesRequest, history: Vec<ChatMessage>, sessio
                     match item_type {
                         "function_call_output" => {
                             let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
+                            // Skip function_call_output items if a tool response
+                            // for this call_id already exists in history.
+                            if existing_tool_responses.contains(call_id) {
+                                i += 1;
+                                continue;
+                            }
                             let output  = item.get("output").and_then(|v| v.as_str()).unwrap_or("");
                             messages.push(ChatMessage {
                                 role: "tool".into(),
@@ -381,5 +417,112 @@ mod tests {
         ]));
         let chat = to_chat_request(&req, vec![], &sessions);
         assert_eq!(chat.messages[0].content.as_deref(), Some("hello world"));
+    }
+
+    // ── Deduplication tests ────────────────────────────────────────────
+
+    /// When previous_response_id supplies history that already contains
+    /// assistant tool_calls, function_call items in the new input with the
+    /// same call_ids must be skipped to avoid duplicate tool_calls messages.
+    #[test]
+    fn test_skip_duplicate_function_call_from_history() {
+        let sessions = SessionStore::new();
+
+        // Simulate history from previous_response_id: assistant with tool_call
+        let history = vec![
+            ChatMessage {
+                role: "user".into(),
+                content: Some("run command".into()),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                reasoning_content: None,
+                tool_calls: Some(vec![json!({
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "exec", "arguments": "{\"cmd\":\"ls\"}"}
+                })]),
+                tool_call_id: None,
+                name: None,
+            },
+        ];
+
+        // Input replays the same function_call + output + new user message
+        let req = base_req(ResponsesInput::Messages(vec![
+            json!({"type": "function_call", "call_id": "call_1", "name": "exec", "arguments": "{\"cmd\":\"ls\"}"}),
+            json!({"type": "function_call_output", "call_id": "call_1", "output": "file.txt"}),
+            json!({"type": "message", "role": "user", "content": "next"}),
+        ]));
+
+        let chat = to_chat_request(&req, history, &sessions);
+
+        // Should have: user, assistant{tool_calls:[call_1]}, tool(call_1), user(next)
+        // NOT: user, assistant{tool_calls:[call_1]}, assistant{tool_calls:[call_1]}, tool(call_1), user
+        assert_eq!(chat.messages.len(), 4, "should not duplicate assistant tool_calls message");
+        assert_eq!(chat.messages[0].role, "user");
+        assert_eq!(chat.messages[1].role, "assistant");
+        assert!(chat.messages[1].tool_calls.is_some());
+        assert_eq!(chat.messages[1].tool_calls.as_ref().unwrap().len(), 1);
+        assert_eq!(chat.messages[2].role, "tool");
+        assert_eq!(chat.messages[2].tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(chat.messages[3].role, "user");
+    }
+
+    /// When previous_response_id supplies history that already contains
+    /// tool messages, function_call_output items in the new input with the
+    /// same call_ids must be skipped.
+    #[test]
+    fn test_skip_duplicate_function_call_output_from_history() {
+        let sessions = SessionStore::new();
+
+        let history = vec![
+            ChatMessage {
+                role: "user".into(),
+                content: Some("run".into()),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                reasoning_content: None,
+                tool_calls: Some(vec![json!({
+                    "id": "call_x",
+                    "type": "function",
+                    "function": {"name": "ls", "arguments": "{}"}
+                })]),
+                tool_call_id: None,
+                name: None,
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: Some("output".into()),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: Some("call_x".into()),
+                name: None,
+            },
+        ];
+
+        // Input replays function_call_output + new user message
+        let req = base_req(ResponsesInput::Messages(vec![
+            json!({"type": "function_call_output", "call_id": "call_x", "output": "output"}),
+            json!({"type": "message", "role": "user", "content": "next"}),
+        ]));
+
+        let chat = to_chat_request(&req, history, &sessions);
+
+        // Should have: user, assistant{tool_calls}, tool, user(next)
+        // NOT: user, assistant{tool_calls}, tool, tool(dup), user
+        assert_eq!(chat.messages.len(), 4);
+        assert_eq!(chat.messages[2].role, "tool");
+        assert_eq!(chat.messages[3].role, "user");
     }
 }

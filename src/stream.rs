@@ -22,7 +22,6 @@ pub struct StreamArgs {
     pub chat_req: ChatRequest,
     pub response_id: String,
     pub sessions: SessionStore,
-    pub prior_messages: Vec<ChatMessage>,
     /// The fully translated request messages (including replayed history).
     /// Used to save correct session history so turn-level reasoning can be
     /// recovered when Codex replays the conversation without previous_response_id.
@@ -55,7 +54,6 @@ pub fn translate_stream(
         chat_req,
         response_id,
         sessions,
-        prior_messages,
         request_messages,
         model,
     } = args;
@@ -282,7 +280,9 @@ pub fn translate_stream(
             sessions.store_turn_reasoning(&request_messages, &assistant_msg, accumulated_reasoning.clone());
         }
 
-        let mut messages = prior_messages;
+        // Save the full request conversation (including current input items)
+        // so that history is complete for the next turn.
+        let mut messages = request_messages;
         messages.push(assistant_msg);
         sessions.save_with_id(response_id.clone(), messages);
 

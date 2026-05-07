@@ -180,7 +180,6 @@ async fn handle_responses_inner(
             chat_req,
             response_id,
             sessions: state.sessions,
-            prior_messages: history,
             request_messages,
             model,
         })
