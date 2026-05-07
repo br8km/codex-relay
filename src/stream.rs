@@ -96,6 +96,7 @@ pub fn translate_stream(
         let mut accumulated_reasoning = String::new();
         let mut tool_calls: BTreeMap<usize, ToolCallAccum> = BTreeMap::new();
         let mut emitted_message_item = false;
+        let mut stream_done = false;
         let mut source = upstream.bytes_stream().eventsource();
 
         while let Some(ev) = source.next().await {
@@ -104,7 +105,10 @@ pub fn translate_stream(
                     warn!("SSE parse error: {e}");
                     break;
                 }
-                Ok(ev) if ev.data.trim() == "[DONE]" => break,
+                Ok(ev) if ev.data.trim() == "[DONE]" => {
+                    stream_done = true;
+                    break;
+                }
                 Ok(ev) if ev.data.is_empty() => continue,
                 Ok(ev) => {
                     match serde_json::from_str::<ChatStreamChunk>(&ev.data) {
@@ -127,7 +131,13 @@ pub fn translate_stream(
                                             .data(json!({
                                                 "type": "response.output_item.added",
                                                 "output_index": 0,
-                                                "item": { "type": "message", "id": &msg_item_id, "role": "assistant", "content": [], "status": "in_progress" }
+                                                "item": {
+                                                    "type": "message",
+                                                    "id": &msg_item_id,
+                                                    "role": "assistant",
+                                                    "status": "in_progress",
+                                                    "content": []
+                                                }
                                             }).to_string()));
                                         emitted_message_item = true;
                                     }
@@ -138,27 +148,30 @@ pub fn translate_stream(
                                             "type": "response.output_text.delta",
                                             "item_id": &msg_item_id,
                                             "output_index": 0,
-                                            "content_index": 0,
                                             "delta": content
                                         }).to_string()));
                                 }
 
-                                // Tool call deltas — accumulate by index
-                                if let Some(delta_calls) = &choice.delta.tool_calls {
-                                    for dc in delta_calls {
-                                        let entry = tool_calls.entry(dc.index).or_insert(ToolCallAccum {
+                                // Tool call deltas
+                                if let Some(tcs) = &choice.delta.tool_calls {
+                                    for tc in tcs {
+                                        let entry = tool_calls.entry(tc.index).or_insert_with(|| ToolCallAccum {
                                             id: String::new(),
                                             name: String::new(),
                                             arguments: String::new(),
                                         });
-                                        if let Some(id) = &dc.id {
-                                            if !id.is_empty() { entry.id.clone_from(id); }
-                                        }
-                                        if let Some(func) = &dc.function {
-                                            if let Some(n) = &func.name {
-                                                if !n.is_empty() { entry.name.push_str(n); }
+                                        if let Some(id) = &tc.id {
+                                            if !id.is_empty() {
+                                                entry.id = id.clone();
                                             }
-                                            if let Some(a) = &func.arguments {
+                                        }
+                                        if let Some(f) = &tc.function {
+                                            if let Some(n) = &f.name {
+                                                if !n.is_empty() {
+                                                    entry.name.push_str(n);
+                                                }
+                                            }
+                                            if let Some(a) = &f.arguments {
                                                 entry.arguments.push_str(a);
                                             }
                                         }
@@ -171,8 +184,7 @@ pub fn translate_stream(
             }
         }
 
-        // Close message item if one was opened
-        if emitted_message_item {
+        if let Some(msg_item_id) = (emitted_message_item).then(|| msg_item_id.clone()) {
             yield Ok(Event::default()
                 .event("response.output_item.done")
                 .data(json!({
@@ -247,69 +259,89 @@ pub fn translate_stream(
             }));
         }
 
-        // Persist turn to session store
-        // Store reasoning_content per call_id so translate.rs can inject it
-        // back when Codex replays function_call items in the next request.
-        for tc in tool_calls.values() {
-            if !tc.id.is_empty() {
-                sessions.store_reasoning(tc.id.clone(), accumulated_reasoning.clone());
-            }
-        }
-
-        let assistant_tool_calls: Option<Vec<Value>> = if tool_calls.is_empty() {
-            None
-        } else {
-            Some(tool_calls.values().map(|tc| json!({
-                "id": &tc.id,
-                "type": "function",
-                "function": { "name": &tc.name, "arguments": &tc.arguments }
-            })).collect())
-        };
-        let assistant_msg = ChatMessage {
-            role: "assistant".into(),
-            content: if accumulated_text.is_empty() { None } else { Some(accumulated_text.clone()) },
-            reasoning_content: if accumulated_reasoning.is_empty() { None } else { Some(accumulated_reasoning.clone()) },
-            tool_calls: assistant_tool_calls,
-            tool_call_id: None,
-            name: None,
-        };
-
-        // Index reasoning by turn fingerprint so it can be recovered when
-        // Codex replays the full conversation in input[] without previous_response_id.
-        if !accumulated_reasoning.is_empty() {
-            sessions.store_turn_reasoning(&request_messages, &assistant_msg, accumulated_reasoning.clone());
-        }
-
-        // Save the full request conversation (including current input items)
-        // so that history is complete for the next turn.
-        let mut messages = request_messages;
-        messages.push(assistant_msg);
-        sessions.save_with_id(response_id.clone(), messages);
-
-        // Build output array for response.completed
-        let mut output_items: Vec<Value> = Vec::new();
-        if emitted_message_item {
-            output_items.push(json!({
-                "type": "message",
-                "id": &msg_item_id,
-                "role": "assistant",
-                "status": "completed",
-                "content": [{"type": "output_text", "text": &accumulated_text}]
-            }));
-        }
-        output_items.extend(fc_items);
-
-        yield Ok(Event::default()
-            .event("response.completed")
-            .data(json!({
-                "type": "response.completed",
-                "response": {
-                    "id": &response_id,
-                    "status": "completed",
-                    "model": &model,
-                    "output": output_items
+        if stream_done {
+            // Persist turn to session store
+            // Store reasoning_content per call_id so translate.rs can inject it
+            // back when Codex replays function_call items in the next request.
+            for tc in tool_calls.values() {
+                if !tc.id.is_empty() {
+                    sessions.store_reasoning(tc.id.clone(), accumulated_reasoning.clone());
                 }
-            }).to_string()));
+            }
+
+            let assistant_tool_calls: Option<Vec<Value>> = if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls.values().map(|tc| json!({
+                    "id": &tc.id,
+                    "type": "function",
+                    "function": { "name": &tc.name, "arguments": &tc.arguments }
+                })).collect())
+            };
+            let assistant_msg = ChatMessage {
+                role: "assistant".into(),
+                content: if accumulated_text.is_empty() { None } else { Some(accumulated_text.clone()) },
+                reasoning_content: if accumulated_reasoning.is_empty() { None } else { Some(accumulated_reasoning.clone()) },
+                tool_calls: assistant_tool_calls,
+                tool_call_id: None,
+                name: None,
+            };
+
+            // Index reasoning by turn fingerprint so it can be recovered when
+            // Codex replays the full conversation in input[] without previous_response_id.
+            if !accumulated_reasoning.is_empty() {
+                sessions.store_turn_reasoning(&request_messages, &assistant_msg, accumulated_reasoning.clone());
+            }
+
+            // Save the full request conversation (including current input items)
+            // so that history is complete for the next turn.
+            let mut messages = request_messages;
+            messages.push(assistant_msg);
+            sessions.save_with_id(response_id.clone(), messages);
+
+            // Build output array for response.completed
+            let mut output_items: Vec<Value> = Vec::new();
+            if emitted_message_item {
+                output_items.push(json!({
+                    "type": "message",
+                    "id": &msg_item_id,
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": &accumulated_text}]
+                }));
+            }
+            output_items.extend(fc_items);
+
+            yield Ok(Event::default()
+                .event("response.completed")
+                .data(json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": &response_id,
+                        "status": "completed",
+                        "model": &model,
+                        "output": output_items
+                    }
+                }).to_string()));
+        } else {
+            // Stream did not complete cleanly: do NOT save session state
+            // to avoid creating an assistant-with-tool_calls gap in history
+            // that causes upstream "insufficient tool messages" errors.
+            warn!("stream disconnected before [DONE] — discarding partial turn");
+            yield Ok(Event::default()
+                .event("response.failed")
+                .data(json!({
+                    "type": "response.failed",
+                    "response": {
+                        "id": &response_id,
+                        "status": "failed",
+                        "error": {
+                            "code": "stream_incomplete",
+                            "message": "stream disconnected before completion"
+                        }
+                    }
+                }).to_string()));
+        }
     };
 
     Sse::new(event_stream).keep_alive(KeepAlive::default())
