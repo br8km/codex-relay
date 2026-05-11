@@ -712,3 +712,127 @@ async fn live_deepseek_v4_pro_reasoning_round_trip() {
         .map(|s| s.contains("Beijing"))
         .unwrap_or(false));
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test 6: multimodal image input on deepseek-v4-pro.
+//
+// Codex sends `input_image` content parts; the relay must translate them into
+// Chat Completions `image_url` parts so vision-capable upstreams (DeepSeek V4
+// Pro) can actually see the image. Before this test existed, image attachments
+// either crashed Codex with 413 or got silently dropped (#2).
+//
+// We send a tiny inline PNG (1×1 red pixel) so the test doesn't depend on
+// external image hosting. We only assert that the request succeeds and the
+// assistant returns non-empty text — we don't assert the *content* of the
+// description because that's model-dependent. The point is to lock in that
+// the relay's wire shape is acceptable to DeepSeek's vision pipeline.
+// ────────────────────────────────────────────────────────────────────────────
+
+/// 1×1 red PNG, base64-encoded. Tiny but valid; enough to exercise the
+/// vision input path without bloating fixtures.
+const TINY_RED_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+fn image_input_body(model: &str, stream: bool) -> Value {
+    let data_url = format!("data:image/png;base64,{TINY_RED_PNG_B64}");
+    json!({
+        "model": model,
+        "instructions": "Answer in one short sentence.",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Describe the attached image briefly."},
+                {"type": "input_image", "image_url": data_url}
+            ]
+        }],
+        "tools": [],
+        "tool_choice": "auto",
+        "parallel_tool_calls": false,
+        "store": false,
+        "stream": stream,
+        "include": []
+    })
+}
+
+#[tokio::test]
+#[ignore]
+async fn live_deepseek_v4_pro_image_input_blocking() {
+    let Some(key) = need_key() else { return };
+    let relay = Relay::spawn(DEEPSEEK_UPSTREAM, &key);
+
+    let resp: Value = reqwest::Client::new()
+        .post(relay.url("/v1/responses"))
+        .json(&image_input_body("deepseek-v4-pro", false))
+        .send()
+        .await
+        .expect("POST /v1/responses")
+        .error_for_status()
+        .expect("non-2xx (relay forwarded an unhappy upstream)")
+        .json()
+        .await
+        .expect("json decode");
+
+    assert_eq!(resp["object"].as_str(), Some("response"));
+    let output = resp["output"].as_array().expect("output array");
+    assert!(!output.is_empty(), "empty output: {resp}");
+    let text = output[0]["content"][0]["text"]
+        .as_str()
+        .expect("output_text present");
+    assert!(
+        !text.trim().is_empty(),
+        "vision model returned empty text — relay likely dropped the image: {resp}"
+    );
+    eprintln!("✓ v4-pro vision blocking output ({} chars): {text}", text.len());
+}
+
+/// Captures the relay's outbound Chat Completions body via a recording proxy
+/// and asserts it is multimodal-shaped (content is an array containing an
+/// `image_url` part). This is the test that locks in the wire-shape contract:
+/// if the relay ever regresses to dropping the image or sending a string
+/// content, this will fail without needing the model to "say the right thing".
+#[tokio::test]
+#[ignore]
+async fn live_deepseek_v4_pro_image_input_wire_shape() {
+    let Some(key) = need_key() else { return };
+
+    let (proxy_port, recorded_bodies) =
+        spawn_recording_proxy("https://api.deepseek.com", &key).await;
+    let proxy_upstream = format!("http://127.0.0.1:{proxy_port}/v1");
+    let relay = Relay::spawn(&proxy_upstream, &key);
+
+    let resp = reqwest::Client::new()
+        .post(relay.url("/v1/responses"))
+        .json(&image_input_body("deepseek-v4-pro", false))
+        .send()
+        .await
+        .expect("POST")
+        .error_for_status()
+        .expect("non-2xx");
+    let _: Value = resp.json().await.expect("json decode");
+
+    let bodies = recorded_bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1, "expected exactly 1 chat-completions POST");
+    let body: Value = serde_json::from_slice(&bodies[0]).expect("body json");
+    let user = body["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|m| m["role"].as_str() == Some("user"))
+        .expect("user message");
+
+    let parts = user["content"]
+        .as_array()
+        .expect("user content must be a multimodal array (got non-array)");
+    let has_text = parts
+        .iter()
+        .any(|p| p["type"].as_str() == Some("text") && p["text"].as_str().is_some());
+    let has_image = parts.iter().any(|p| {
+        p["type"].as_str() == Some("image_url")
+            && p["image_url"]["url"]
+                .as_str()
+                .map(|s| s.starts_with("data:image/png;base64,"))
+                .unwrap_or(false)
+    });
+    assert!(has_text, "missing text part: {parts:?}");
+    assert!(has_image, "missing image_url part: {parts:?}");
+}

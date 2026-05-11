@@ -391,35 +391,7 @@ async fn handle_responses(
         req.previous_response_id
     );
 
-    if let Some(unsupported) = translate::first_unsupported_content(&req) {
-        warn!(
-            "rejecting request with unsupported content part: {}",
-            unsupported.kind
-        );
-        return unsupported_content_response(&unsupported.kind);
-    }
-
     handle_responses_inner(state, req).await
-}
-
-/// Build a Responses-API-shaped 400 for content parts the relay can't forward.
-/// Matches the OpenAI error envelope so Codex CLI surfaces the message instead
-/// of treating it as a transport failure.
-fn unsupported_content_response(kind: &str) -> Response {
-    let message = format!(
-        "codex-relay does not currently support multimodal input \
-         ({kind} content parts). Send a text-only message, or use \
-         a client that talks directly to a vision-capable provider."
-    );
-    let body = serde_json::json!({
-        "error": {
-            "message": message,
-            "type": "invalid_request_error",
-            "code": "unsupported_content",
-            "param": "input",
-        }
-    });
-    (StatusCode::BAD_REQUEST, Json(body)).into_response()
 }
 
 async fn handle_responses_inner(state: AppState, req: ResponsesRequest) -> Response {
@@ -496,7 +468,7 @@ async fn handle_blocking(
                     .map(|c| c.message.clone())
                     .unwrap_or_else(|| ChatMessage {
                         role: "assistant".into(),
-                        content: Some(String::new()),
+                        content: Some(serde_json::Value::String(String::new())),
                         reasoning_content: None,
                         tool_calls: None,
                         tool_call_id: None,
@@ -589,15 +561,4 @@ mod tests {
         assert!(props.supports_parallel_tool_calls);
     }
 
-    #[test]
-    fn test_unsupported_content_response_shape() {
-        let resp = unsupported_content_response("input_image");
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let ct = resp
-            .headers()
-            .get(axum::http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        assert!(ct.starts_with("application/json"), "content-type: {ct}");
-    }
 }
