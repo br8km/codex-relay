@@ -173,6 +173,7 @@ This project is **not affiliated with, endorsed by, or sponsored by OpenAI**. "C
 ## Contributors
 
 - [myk5010](https://github.com/myk5010) — system/developer message ordering fix and model name mapping ([\#4](https://github.com/MetaFARS/codex-relay/pull/4))
+- [qcnhy](https://github.com/qcnhy) — streaming usage and MCP namespace bug reports plus independent verification ([\#5](https://github.com/MetaFARS/codex-relay/issues/5), [\#6](https://github.com/MetaFARS/codex-relay/issues/6))
 
 ## License
 
