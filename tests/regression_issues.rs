@@ -12,8 +12,8 @@ use axum::{
     Router,
 };
 use codex_relay::session::SessionStore;
-use codex_relay::translate::to_chat_request;
-use codex_relay::types::ResponsesRequest;
+use codex_relay::translate::{from_chat_response, to_chat_request};
+use codex_relay::types::{ChatChoice, ChatMessage, ChatResponse, ResponsesRequest};
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -61,9 +61,38 @@ fn issue_6_namespace_tools_keep_namespace_when_flattened() {
     assert!(
         names
             .iter()
-            .any(|n| n == "mcp__codex_apps__github_add_comment_to_issue"),
+            .any(|n| n == "mcp__codex_apps__github._add_comment_to_issue"),
         "namespace child tool should be flattened with its namespace prefix: {names:?}"
     );
+}
+
+#[test]
+fn issue_17_blocking_namespaced_tool_calls_emit_namespace_field() {
+    let chat = ChatResponse {
+        choices: vec![ChatChoice {
+            message: ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                reasoning_content: None,
+                tool_calls: Some(vec![json!({
+                    "id": "call_js",
+                    "type": "function",
+                    "function": {
+                        "name": "mcp__node_repl.js",
+                        "arguments": "{}"
+                    }
+                })]),
+                tool_call_id: None,
+                name: None,
+            },
+        }],
+        usage: None,
+    };
+
+    let (resp, _) = from_chat_response("resp_17".into(), "mock-model", chat);
+    assert_eq!(resp.output[0]["type"], "function_call");
+    assert_eq!(resp.output[0]["namespace"], "mcp__node_repl");
+    assert_eq!(resp.output[0]["name"], "js");
 }
 
 #[derive(Clone)]
@@ -266,6 +295,59 @@ async fn issue_5_streaming_completed_event_includes_usage() {
         upstream_body["stream_options"],
         json!({"include_usage": true}),
         "streaming Chat Completions requests must ask upstream to include usage"
+    );
+}
+
+#[tokio::test]
+async fn issue_17_streaming_namespaced_tool_calls_emit_namespace_field() {
+    let tool_sse = sse_from_chunks(vec![
+        json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_js",
+                        "function": {
+                            "name": "mcp__node_repl.js",
+                            "arguments": "{}"
+                        }
+                    }]
+                }
+            }]
+        }),
+        json!({"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":3,"total_tokens":14}}),
+    ]);
+    let (upstream_port, bodies) = spawn_mock_upstream_with_responses(vec![tool_sse]).await;
+    let relay = Relay::spawn(&format!("http://127.0.0.1:{upstream_port}/v1"));
+
+    let completed = post_stream_completed(
+        &relay,
+        json!({
+            "model": "mock-model",
+            "input": "Use the JS REPL.",
+            "tools": [{
+                "type": "namespace",
+                "name": "mcp__node_repl",
+                "tools": [{
+                    "type": "function",
+                    "name": "js",
+                    "parameters": {"type": "object"}
+                }]
+            }],
+            "stream": true
+        }),
+    )
+    .await;
+
+    let item = &completed["response"]["output"][0];
+    assert_eq!(item["type"], "function_call");
+    assert_eq!(item["namespace"], "mcp__node_repl");
+    assert_eq!(item["name"], "js");
+
+    let request_bodies = bodies.lock().unwrap();
+    assert_eq!(
+        request_bodies[0]["tools"][0]["function"]["name"], "mcp__node_repl.js",
+        "namespace tools must be flattened with a reversible separator"
     );
 }
 
