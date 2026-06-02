@@ -264,7 +264,7 @@ fn convert_tools_with_denylist(tools: &[Value], denied: &HashSet<String>) -> Vec
                             let name = sub
                                 .get("name")
                                 .and_then(Value::as_str)
-                                .map(|name| format!("{namespace}{name}"));
+                                .map(|name| chat_function_name_for_namespace_tool(namespace, name));
                             if !tool_is_denied(sub, name.as_deref(), denied) {
                                 out.push(convert_tool_with_name(sub, name.as_deref()));
                             }
@@ -344,7 +344,15 @@ fn convert_tool_with_name(tool: &Value, override_name: Option<&str>) -> Value {
 fn response_function_name_for_chat(item: &Value) -> String {
     let name = item.get("name").and_then(Value::as_str).unwrap_or("");
     let namespace = item.get("namespace").and_then(Value::as_str).unwrap_or("");
-    format!("{namespace}{name}")
+    if namespace.is_empty() {
+        name.to_string()
+    } else {
+        chat_function_name_for_namespace_tool(namespace, name)
+    }
+}
+
+pub(crate) fn chat_function_name_for_namespace_tool(namespace: &str, name: &str) -> String {
+    format!("{namespace}.{name}")
 }
 
 /// Convert a Chat Completions response into a Responses API response.
@@ -426,6 +434,12 @@ pub fn from_chat_response(
 }
 
 pub(crate) fn split_mcp_function_name(name: &str) -> (Option<String>, String) {
+    if let Some((namespace, child)) = name.split_once('.') {
+        if !namespace.is_empty() && !child.is_empty() {
+            return (Some(namespace.to_string()), child.to_string());
+        }
+    }
+
     let Some(rest) = name.strip_prefix("mcp__") else {
         return (None, name.to_string());
     };
@@ -586,7 +600,7 @@ mod tests {
         let req = base_req(ResponsesInput::Messages(vec![json!({
             "type": "function_call",
             "call_id": "call_status",
-            "namespace": "mcp__burp_ai_agent__",
+            "namespace": "mcp__node_repl",
             "name": "status",
             "arguments": "{}"
         })]));
@@ -594,7 +608,7 @@ mod tests {
         let calls = chat.messages[0].tool_calls.as_ref().unwrap();
         assert_eq!(
             calls[0]["function"]["name"].as_str(),
-            Some("mcp__burp_ai_agent__status")
+            Some("mcp__node_repl.status")
         );
     }
 
@@ -610,7 +624,7 @@ mod tests {
                         "id": "call_status",
                         "type": "function",
                         "function": {
-                            "name": "mcp__burp_ai_agent__status",
+                            "name": "mcp__node_repl.status",
                             "arguments": "{}"
                         }
                     })]),
@@ -624,9 +638,37 @@ mod tests {
         let (resp, _) = from_chat_response("resp_1".into(), "test-model", chat);
         assert_eq!(resp.output.len(), 1);
         assert_eq!(resp.output[0]["type"], "function_call");
-        assert_eq!(resp.output[0]["namespace"], "mcp__burp_ai_agent__");
+        assert_eq!(resp.output[0]["namespace"], "mcp__node_repl");
         assert_eq!(resp.output[0]["name"], "status");
         assert_eq!(resp.output[0]["call_id"], "call_status");
+    }
+
+    #[test]
+    fn test_from_chat_response_keeps_legacy_non_namespaced_tool_name() {
+        let chat = ChatResponse {
+            choices: vec![ChatChoice {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: None,
+                    reasoning_content: None,
+                    tool_calls: Some(vec![json!({
+                        "id": "call_status",
+                        "type": "function",
+                        "function": {
+                            "name": "mcp__node_repljs",
+                            "arguments": "{}"
+                        }
+                    })]),
+                    tool_call_id: None,
+                    name: None,
+                },
+            }],
+            usage: None,
+        };
+
+        let (resp, _) = from_chat_response("resp_1".into(), "test-model", chat);
+        assert!(resp.output[0].get("namespace").is_none());
+        assert_eq!(resp.output[0]["name"], "mcp__node_repljs");
     }
 
     #[test]
@@ -690,17 +732,14 @@ mod tests {
             json!({"type": "function", "name": "exec_command"}),
             json!({
                 "type": "namespace",
-                "name": "mcp__server__",
+                "name": "mcp__server",
                 "tools": [
                     {"type": "function", "name": "blocked"},
                     {"type": "function", "name": "allowed"}
                 ]
             }),
         ];
-        let denied = HashSet::from([
-            "spawn_agent".to_string(),
-            "mcp__server__blocked".to_string(),
-        ]);
+        let denied = HashSet::from(["spawn_agent".to_string(), "mcp__server.blocked".to_string()]);
 
         let converted = convert_tools_with_denylist(&tools, &denied);
         let names: Vec<&str> = converted
@@ -712,7 +751,7 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(names, ["exec_command", "mcp__server__allowed"]);
+        assert_eq!(names, ["exec_command", "mcp__server.allowed"]);
     }
 
     #[test]
