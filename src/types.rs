@@ -125,6 +125,53 @@ pub struct ChatUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    // Prompt-cache accounting. Providers disagree on the shape:
+    //   DeepSeek / packyapi: top-level prompt_cache_{hit,miss}_tokens
+    //   OpenAI-compatible:   prompt_tokens_details.cached_tokens
+    // Capture both; normalize via cache_hit()/cache_miss().
+    #[serde(default)]
+    pub prompt_cache_hit_tokens: Option<u32>,
+    #[serde(default)]
+    pub prompt_cache_miss_tokens: Option<u32>,
+    #[serde(default)]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct PromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: u32,
+}
+
+impl ChatUsage {
+    /// Cached (hit) prompt tokens. Prefers the DeepSeek-style top-level field,
+    /// else falls back to the OpenAI-style `prompt_tokens_details.cached_tokens`.
+    fn cache_hit(&self) -> u32 {
+        self.prompt_cache_hit_tokens
+            .or_else(|| self.prompt_tokens_details.as_ref().map(|d| d.cached_tokens))
+            .unwrap_or(0)
+    }
+
+    /// Non-cached (miss) prompt tokens; falls back to `prompt_tokens - hit`.
+    fn cache_miss(&self) -> u32 {
+        self.prompt_cache_miss_tokens
+            .unwrap_or_else(|| self.prompt_tokens.saturating_sub(self.cache_hit()))
+    }
+
+    /// One-line prompt-cache summary for debug logging, e.g.
+    /// `hit=1152 miss=51 prompt=1203 hit_rate=95.8%`.
+    pub fn cache_summary(&self) -> String {
+        let (hit, prompt) = (self.cache_hit(), self.prompt_tokens);
+        let rate = if prompt > 0 {
+            100.0 * hit as f64 / prompt as f64
+        } else {
+            0.0
+        };
+        format!(
+            "hit={hit} miss={} prompt={prompt} hit_rate={rate:.1}%",
+            self.cache_miss()
+        )
+    }
 }
 
 // ── SSE streaming types ───────────────────────────────────────────────────────
@@ -169,4 +216,71 @@ pub struct DeltaFunction {
     pub name: Option<String>,
     #[serde(default)]
     pub arguments: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChatUsage;
+    use serde_json::json;
+
+    #[test]
+    fn cache_summary_uses_deepseek_top_level_cache_fields() {
+        let usage: ChatUsage = serde_json::from_value(json!({
+            "prompt_tokens": 1203,
+            "completion_tokens": 25,
+            "total_tokens": 1228,
+            "prompt_cache_hit_tokens": 1152,
+            "prompt_cache_miss_tokens": 51
+        }))
+        .unwrap();
+
+        assert_eq!(
+            usage.cache_summary(),
+            "hit=1152 miss=51 prompt=1203 hit_rate=95.8%"
+        );
+    }
+
+    #[test]
+    fn cache_summary_uses_openai_prompt_tokens_details() {
+        let usage: ChatUsage = serde_json::from_value(json!({
+            "prompt_tokens": 893,
+            "completion_tokens": 12,
+            "total_tokens": 905,
+            "prompt_tokens_details": {
+                "cached_tokens": 640
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            usage.cache_summary(),
+            "hit=640 miss=253 prompt=893 hit_rate=71.7%"
+        );
+    }
+
+    #[test]
+    fn cache_summary_prefers_top_level_hit_when_both_shapes_exist() {
+        let usage: ChatUsage = serde_json::from_value(json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+            "prompt_cache_hit_tokens": 25,
+            "prompt_tokens_details": {
+                "cached_tokens": 90
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            usage.cache_summary(),
+            "hit=25 miss=75 prompt=100 hit_rate=25.0%"
+        );
+    }
+
+    #[test]
+    fn cache_summary_handles_missing_usage_fields() {
+        let usage = ChatUsage::default();
+
+        assert_eq!(usage.cache_summary(), "hit=0 miss=0 prompt=0 hit_rate=0.0%");
+    }
 }
