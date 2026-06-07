@@ -340,7 +340,7 @@ async fn issue_5_streaming_completed_event_includes_usage() {
     let completed = completed.expect("response.completed event");
     assert_eq!(
         completed["response"]["usage"],
-        json!({"input_tokens": 7, "output_tokens": 2, "total_tokens": 9})
+        json!({"input_tokens": 7, "output_tokens": 2, "total_tokens": 9, "input_tokens_details": {"cached_tokens": 0}})
     );
 
     let request_bodies = bodies.lock().unwrap();

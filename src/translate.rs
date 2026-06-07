@@ -480,6 +480,9 @@ pub fn from_chat_response_with_tool_map(
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
+            input_tokens_details: Some(InputTokensDetails {
+                cached_tokens: usage.cache_hit(),
+            }),
         },
     };
 
