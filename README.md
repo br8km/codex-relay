@@ -259,6 +259,7 @@ This project is **not affiliated with, endorsed by, or sponsored by OpenAI**. "C
 - [JasonC93](https://github.com/JasonC93) — subagent tool-routing and spawned-agent context isolation reports ([\#10](https://github.com/MetaFARS/codex-relay/issues/10), [\#12](https://github.com/MetaFARS/codex-relay/issues/12))
 - [ma-buting](https://github.com/ma-buting) — namespace tool-name separator fix ([\#19](https://github.com/MetaFARS/codex-relay/pull/19))
 - [SaladDay](https://github.com/SaladDay) — prompt-cache accounting debug logs ([\#22](https://github.com/MetaFARS/codex-relay/pull/22))
+- [Cherno76](https://github.com/Cherno76) — prompt-cache hit tokens in Responses API usage ([\#23](https://github.com/MetaFARS/codex-relay/pull/23))
 
 ## License
 
