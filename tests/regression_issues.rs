@@ -15,7 +15,7 @@ use codex_relay::session::SessionStore;
 use codex_relay::translate::{
     from_chat_response_with_tool_map, namespace_tool_map, to_chat_request,
 };
-use codex_relay::types::{ChatChoice, ChatMessage, ChatResponse, ResponsesRequest};
+use codex_relay::types::{ChatChoice, ChatMessage, ChatResponse, ChatUsage, ResponsesRequest};
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -134,6 +134,47 @@ fn issue_20_blocking_hyphen_flat_tool_name_is_not_namespaced() {
     assert_eq!(resp.output[0]["type"], "function_call");
     assert!(resp.output[0].get("namespace").is_none());
     assert_eq!(resp.output[0]["name"], "foo-bar");
+}
+
+#[test]
+fn blocking_response_usage_includes_cached_tokens() {
+    let chat = ChatResponse {
+        choices: vec![ChatChoice {
+            message: ChatMessage {
+                role: "assistant".into(),
+                content: Some("OK".into()),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+        }],
+        usage: Some(ChatUsage {
+            prompt_tokens: 17,
+            completion_tokens: 2,
+            total_tokens: 19,
+            prompt_cache_hit_tokens: Some(11),
+            prompt_cache_miss_tokens: Some(6),
+            prompt_tokens_details: None,
+        }),
+    };
+
+    let (resp, _) = from_chat_response_with_tool_map(
+        "resp_cached".into(),
+        "mock-model",
+        chat,
+        &Default::default(),
+    );
+
+    assert_eq!(
+        serde_json::to_value(resp.usage).expect("usage json"),
+        json!({
+            "input_tokens": 17,
+            "output_tokens": 2,
+            "total_tokens": 19,
+            "input_tokens_details": {"cached_tokens": 11}
+        })
+    );
 }
 
 #[derive(Clone)]
@@ -340,7 +381,7 @@ async fn issue_5_streaming_completed_event_includes_usage() {
     let completed = completed.expect("response.completed event");
     assert_eq!(
         completed["response"]["usage"],
-        json!({"input_tokens": 7, "output_tokens": 2, "total_tokens": 9})
+        json!({"input_tokens": 7, "output_tokens": 2, "total_tokens": 9, "input_tokens_details": {"cached_tokens": 0}})
     );
 
     let request_bodies = bodies.lock().unwrap();
@@ -349,6 +390,46 @@ async fn issue_5_streaming_completed_event_includes_usage() {
         upstream_body["stream_options"],
         json!({"include_usage": true}),
         "streaming Chat Completions requests must ask upstream to include usage"
+    );
+}
+
+#[tokio::test]
+async fn streaming_response_usage_includes_cached_tokens() {
+    let cached_usage_sse = sse_from_chunks(vec![
+        json!({"choices":[{"delta":{"role":"assistant","content":"OK"}}]}),
+        json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 17,
+                "completion_tokens": 2,
+                "total_tokens": 19,
+                "prompt_cache_hit_tokens": 11,
+                "prompt_cache_miss_tokens": 6
+            }
+        }),
+    ]);
+    let (upstream_port, _bodies) = spawn_mock_upstream_with_responses(vec![cached_usage_sse]).await;
+    let relay = Relay::spawn(&format!("http://127.0.0.1:{upstream_port}/v1"));
+
+    let completed = post_stream_completed(
+        &relay,
+        json!({
+            "model": "mock-model",
+            "input": "Say OK.",
+            "tools": [],
+            "stream": true
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        completed["response"]["usage"],
+        json!({
+            "input_tokens": 17,
+            "output_tokens": 2,
+            "total_tokens": 19,
+            "input_tokens_details": {"cached_tokens": 11}
+        })
     );
 }
 

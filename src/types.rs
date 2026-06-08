@@ -55,6 +55,13 @@ pub struct ResponsesUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub total_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens_details: Option<InputTokensDetails>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InputTokensDetails {
+    pub cached_tokens: u32,
 }
 
 // ── Chat Completions (outbound to provider) ──────────────────────────────────
@@ -146,14 +153,14 @@ pub struct PromptTokensDetails {
 impl ChatUsage {
     /// Cached (hit) prompt tokens. Prefers the DeepSeek-style top-level field,
     /// else falls back to the OpenAI-style `prompt_tokens_details.cached_tokens`.
-    fn cache_hit(&self) -> u32 {
+    pub(crate) fn cache_hit(&self) -> u32 {
         self.prompt_cache_hit_tokens
             .or_else(|| self.prompt_tokens_details.as_ref().map(|d| d.cached_tokens))
             .unwrap_or(0)
     }
 
     /// Non-cached (miss) prompt tokens; falls back to `prompt_tokens - hit`.
-    fn cache_miss(&self) -> u32 {
+    pub(crate) fn cache_miss(&self) -> u32 {
         self.prompt_cache_miss_tokens
             .unwrap_or_else(|| self.prompt_tokens.saturating_sub(self.cache_hit()))
     }
