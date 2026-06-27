@@ -210,8 +210,7 @@ pub fn to_chat_request(
     // prompts (e.g. Codex). Other providers (DeepSeek/Kimi) think by default and
     // must not receive this field, so it stays GLM-gated to preserve their
     // request shape. See GitHub issue #26.
-    let enable_glm_thinking =
-        is_glm_like_model(&req.model) || is_glm_like_model(&mapped_model);
+    let enable_glm_thinking = is_glm_like_model(&req.model) || is_glm_like_model(&mapped_model);
 
     ChatRequest {
         model: mapped_model,

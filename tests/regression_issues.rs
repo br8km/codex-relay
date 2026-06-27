@@ -447,7 +447,12 @@ async fn issue_26_glm_model_enables_thinking_on_upstream_request() {
     )
     .await;
 
-    let body = bodies.lock().unwrap().last().cloned().expect("upstream body");
+    let body = bodies
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("upstream body");
     assert_eq!(
         body["thinking"],
         json!({"type": "enabled"}),
@@ -468,7 +473,12 @@ async fn issue_26_non_glm_model_does_not_send_thinking() {
     )
     .await;
 
-    let body = bodies.lock().unwrap().last().cloned().expect("upstream body");
+    let body = bodies
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("upstream body");
     assert!(
         body.get("thinking").is_none(),
         "non-GLM request must not include thinking: {body}"
