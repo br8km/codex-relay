@@ -434,6 +434,93 @@ async fn streaming_response_usage_includes_cached_tokens() {
 }
 
 #[tokio::test]
+async fn issue_26_streaming_reasoning_content_emits_responses_reasoning_events() {
+    let reasoning_sse = sse_from_chunks(vec![
+        json!({"choices":[{"delta":{"role":"assistant","reasoning_content":"think "}}]}),
+        json!({"choices":[{"delta":{"reasoning_content":"through it"}}]}),
+        json!({"choices":[{"delta":{"content":"OK"}}]}),
+        json!({"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":3,"total_tokens":12}}),
+    ]);
+    let (upstream_port, _bodies) = spawn_mock_upstream_with_responses(vec![reasoning_sse]).await;
+    let relay = Relay::spawn(&format!("http://127.0.0.1:{upstream_port}/v1"));
+
+    let events = post_stream_events(
+        &relay,
+        json!({
+            "model": "mock-model",
+            "input": "Reason briefly.",
+            "tools": [],
+            "stream": true
+        }),
+    )
+    .await;
+
+    let reasoning_added = events
+        .iter()
+        .find(|(event, data)| {
+            event == "response.output_item.added" && data["item"]["type"] == "reasoning"
+        })
+        .map(|(_, data)| data)
+        .expect("reasoning output_item.added");
+    assert_eq!(reasoning_added["output_index"], 0);
+    let reasoning_item_id = reasoning_added["item"]["id"]
+        .as_str()
+        .expect("reasoning item id");
+
+    let deltas: Vec<&Value> = events
+        .iter()
+        .filter_map(|(event, data)| {
+            (event == "response.reasoning_summary_text.delta").then_some(data)
+        })
+        .collect();
+    assert_eq!(deltas.len(), 2);
+    assert_eq!(deltas[0]["delta"], "think ");
+    assert_eq!(deltas[1]["delta"], "through it");
+    for delta in deltas {
+        assert_eq!(delta["item_id"], reasoning_item_id);
+        assert_eq!(delta["output_index"], 0);
+        assert_eq!(delta["summary_index"], 0);
+    }
+
+    let reasoning_done = events
+        .iter()
+        .find(|(event, data)| {
+            event == "response.output_item.done" && data["item"]["type"] == "reasoning"
+        })
+        .map(|(_, data)| data)
+        .expect("reasoning output_item.done");
+    assert_eq!(reasoning_done["output_index"], 0);
+    assert_eq!(
+        reasoning_done["item"]["summary"],
+        json!([{"type": "summary_text", "text": "think through it"}])
+    );
+
+    let message_added = events
+        .iter()
+        .find(|(event, data)| {
+            event == "response.output_item.added" && data["item"]["type"] == "message"
+        })
+        .map(|(_, data)| data)
+        .expect("message output_item.added");
+    assert_eq!(message_added["output_index"], 1);
+
+    let completed = events
+        .iter()
+        .find_map(|(event, data)| (event == "response.completed").then_some(data))
+        .expect("response.completed");
+    assert_eq!(completed["response"]["output"][0]["type"], "reasoning");
+    assert_eq!(
+        completed["response"]["output"][0]["summary"],
+        json!([{"type": "summary_text", "text": "think through it"}])
+    );
+    assert_eq!(completed["response"]["output"][1]["type"], "message");
+    assert_eq!(
+        completed["response"]["output"][1]["content"],
+        json!([{"type": "output_text", "text": "OK"}])
+    );
+}
+
+#[tokio::test]
 async fn issue_17_streaming_namespaced_tool_calls_emit_namespace_field() {
     let tool_sse = sse_from_chunks(vec![
         json!({

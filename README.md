@@ -106,7 +106,7 @@ Any OpenAI-compatible endpoint works.
 - **Streaming** — full SSE streaming with correct event sequencing
 - **Tool calls** — accumulates streaming deltas and emits structured function_call items
 - **Parallel tool calls** — consecutive function_call input items merged into one assistant message
-- **Reasoning models** — preserves `reasoning_content` across turns (Kimi k2.6, DeepSeek-R1)
+- **Reasoning models** — streams `reasoning_content` as Responses reasoning summaries and preserves it across turns (Kimi k2.6, DeepSeek-R1)
 - **Model catalog** — proxies `/v1/models` from the upstream provider
 - **Auto-config** — `--print-config` generates a complete Codex config with model metadata
 
