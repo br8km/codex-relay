@@ -93,6 +93,7 @@ input_modalities = ["text"]
 |---|---|---|
 | DeepSeek | `https://api.deepseek.com/v1` | 4446 |
 | Kimi (Moonshot) | `https://api.moonshot.cn/v1` | 4447 |
+| GLM (Zhipu) | `https://open.bigmodel.cn/api/coding/paas/v4` | 4453 |
 | Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 4448 |
 | Mistral | `https://api.mistral.ai/v1` | 4449 |
 | Groq | `https://api.groq.com/openai/v1` | 4450 |
@@ -106,7 +107,7 @@ Any OpenAI-compatible endpoint works.
 - **Streaming** — full SSE streaming with correct event sequencing
 - **Tool calls** — accumulates streaming deltas and emits structured function_call items
 - **Parallel tool calls** — consecutive function_call input items merged into one assistant message
-- **Reasoning models** — streams `reasoning_content` as Responses reasoning summaries and preserves it across turns (Kimi k2.6, DeepSeek-R1)
+- **Reasoning models** — streams `reasoning_content` (or the `reasoning` alias) as Responses reasoning summaries and preserves it across turns (Kimi k2.6, DeepSeek-R1, GLM). For GLM/Zhipu models the relay automatically sends `thinking: {"type": "enabled"}`, since GLM otherwise suppresses reasoning under Codex's system prompt
 - **Model catalog** — proxies `/v1/models` from the upstream provider
 - **Auto-config** — `--print-config` generates a complete Codex config with model metadata
 
