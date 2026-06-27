@@ -78,12 +78,24 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<ChatStreamOptions>,
+    /// Zhipu/GLM thinking switch. Only serialized for GLM-like models so other
+    /// providers keep their existing request shape. GLM suppresses its default
+    /// auto-thinking under heavy agent system prompts (e.g. Codex), so this must
+    /// be sent explicitly for reasoning to be emitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ChatThinking>,
     pub stream: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ChatStreamOptions {
     pub include_usage: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChatThinking {
+    #[serde(rename = "type")]
+    pub kind: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -202,10 +214,26 @@ pub struct ChatDelta {
     #[allow(dead_code)]
     pub role: Option<String>,
     pub content: Option<String>,
+    /// Thinking content. Providers disagree on the field name: DeepSeek/Kimi/GLM
+    /// use `reasoning_content`; OpenRouter/Together-style (and some newer GLM-5
+    /// deployments) use `reasoning`. Capture both and normalize via
+    /// [`ChatDelta::reasoning_text`].
     #[serde(default)]
     pub reasoning_content: Option<String>,
     #[serde(default)]
+    pub reasoning: Option<String>,
+    #[serde(default)]
     pub tool_calls: Option<Vec<DeltaToolCall>>,
+}
+
+impl ChatDelta {
+    /// Normalized reasoning delta, preferring `reasoning_content` and falling
+    /// back to the `reasoning` alias.
+    pub fn reasoning_text(&self) -> Option<&str> {
+        self.reasoning_content
+            .as_deref()
+            .or(self.reasoning.as_deref())
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
