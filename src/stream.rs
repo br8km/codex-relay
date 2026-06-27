@@ -73,6 +73,7 @@ pub fn translate_stream(
         model,
     } = args;
     let msg_item_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+    let reasoning_item_id = format!("rs_{}", uuid::Uuid::new_v4().simple());
 
     let event_stream = stream! {
         yield Ok(Event::default()
@@ -110,7 +111,9 @@ pub fn translate_stream(
         let mut accumulated_text = String::new();
         let mut accumulated_reasoning = String::new();
         let mut tool_calls: BTreeMap<usize, ToolCallAccum> = BTreeMap::new();
-        let mut emitted_message_item = false;
+        let mut reasoning_output_index: Option<usize> = None;
+        let mut message_output_index: Option<usize> = None;
+        let mut next_output_index: usize = 0;
         let mut stream_done = false;
         let mut stream_usage: Option<ChatUsage> = None;
         let mut source = upstream.bytes_stream().eventsource();
@@ -138,36 +141,71 @@ pub fn translate_stream(
                                 // Reasoning/thinking content (kimi-k2.6 etc.)
                                 if let Some(rc) = choice.delta.reasoning_content.as_deref() {
                                     if !rc.is_empty() {
+                                        let output_index = match reasoning_output_index {
+                                            Some(idx) => idx,
+                                            None => {
+                                                let idx = next_output_index;
+                                                next_output_index += 1;
+                                                reasoning_output_index = Some(idx);
+                                                yield Ok(Event::default()
+                                                    .event("response.output_item.added")
+                                                    .data(json!({
+                                                        "type": "response.output_item.added",
+                                                        "output_index": idx,
+                                                        "item": {
+                                                            "type": "reasoning",
+                                                            "id": &reasoning_item_id,
+                                                            "summary": [{"type": "summary_text", "text": ""}]
+                                                        }
+                                                    }).to_string()));
+                                                idx
+                                            }
+                                        };
                                         accumulated_reasoning.push_str(rc);
+                                        yield Ok(Event::default()
+                                            .event("response.reasoning_summary_text.delta")
+                                            .data(json!({
+                                                "type": "response.reasoning_summary_text.delta",
+                                                "item_id": &reasoning_item_id,
+                                                "output_index": output_index,
+                                                "summary_index": 0,
+                                                "delta": rc
+                                            }).to_string()));
                                     }
                                 }
 
                                 // Text content
                                 let content = choice.delta.content.as_deref().unwrap_or("");
                                 if !content.is_empty() {
-                                    if !emitted_message_item {
-                                        yield Ok(Event::default()
-                                            .event("response.output_item.added")
-                                            .data(json!({
-                                                "type": "response.output_item.added",
-                                                "output_index": 0,
-                                                "item": {
-                                                    "type": "message",
-                                                    "id": &msg_item_id,
-                                                    "role": "assistant",
-                                                    "status": "in_progress",
-                                                    "content": []
-                                                }
-                                            }).to_string()));
-                                        emitted_message_item = true;
-                                    }
+                                    let output_index = match message_output_index {
+                                        Some(idx) => idx,
+                                        None => {
+                                            let idx = next_output_index;
+                                            next_output_index += 1;
+                                            message_output_index = Some(idx);
+                                            yield Ok(Event::default()
+                                                .event("response.output_item.added")
+                                                .data(json!({
+                                                    "type": "response.output_item.added",
+                                                    "output_index": idx,
+                                                    "item": {
+                                                        "type": "message",
+                                                        "id": &msg_item_id,
+                                                        "role": "assistant",
+                                                        "status": "in_progress",
+                                                        "content": []
+                                                    }
+                                                }).to_string()));
+                                            idx
+                                        }
+                                    };
                                     accumulated_text.push_str(content);
                                     yield Ok(Event::default()
                                         .event("response.output_text.delta")
                                         .data(json!({
                                             "type": "response.output_text.delta",
                                             "item_id": &msg_item_id,
-                                            "output_index": 0,
+                                            "output_index": output_index,
                                             "delta": content
                                         }).to_string()));
                                 }
@@ -204,12 +242,26 @@ pub fn translate_stream(
             }
         }
 
-        if let Some(msg_item_id) = (emitted_message_item).then(|| msg_item_id.clone()) {
+        if let Some(output_index) = reasoning_output_index {
             yield Ok(Event::default()
                 .event("response.output_item.done")
                 .data(json!({
                     "type": "response.output_item.done",
-                    "output_index": 0,
+                    "output_index": output_index,
+                    "item": {
+                        "type": "reasoning",
+                        "id": &reasoning_item_id,
+                        "summary": [{"type": "summary_text", "text": &accumulated_reasoning}]
+                    }
+                }).to_string()));
+        }
+
+        if let Some(output_index) = message_output_index {
+            yield Ok(Event::default()
+                .event("response.output_item.done")
+                .data(json!({
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
                     "item": {
                         "type": "message",
                         "id": &msg_item_id,
@@ -221,8 +273,8 @@ pub fn translate_stream(
         }
 
         // Emit function_call items for each accumulated tool call
-        let base_index: usize = if emitted_message_item { 1 } else { 0 };
-        let mut fc_items: Vec<Value> = Vec::new();
+        let base_index = next_output_index;
+        let mut fc_items: Vec<(usize, Value)> = Vec::new();
         debug!(
             "← upstream stream function_calls={}",
             summarize_stream_tool_call_names(&tool_calls)
@@ -280,7 +332,7 @@ pub fn translate_stream(
                     "item": done_item
                 }).to_string()));
 
-            fc_items.push(done_item);
+            fc_items.push((output_index, done_item));
         }
 
         if stream_done {
@@ -324,17 +376,29 @@ pub fn translate_stream(
             sessions.save_with_id(response_id.clone(), messages);
 
             // Build output array for response.completed
-            let mut output_items: Vec<Value> = Vec::new();
-            if emitted_message_item {
-                output_items.push(json!({
+            let mut indexed_output_items: Vec<(usize, Value)> = Vec::new();
+            if let Some(output_index) = reasoning_output_index {
+                indexed_output_items.push((output_index, json!({
+                    "type": "reasoning",
+                    "id": &reasoning_item_id,
+                    "summary": [{"type": "summary_text", "text": &accumulated_reasoning}]
+                })));
+            }
+            if let Some(output_index) = message_output_index {
+                indexed_output_items.push((output_index, json!({
                     "type": "message",
                     "id": &msg_item_id,
                     "role": "assistant",
                     "status": "completed",
                     "content": [{"type": "output_text", "text": &accumulated_text}]
-                }));
+                })));
             }
-            output_items.extend(fc_items);
+            indexed_output_items.extend(fc_items);
+            indexed_output_items.sort_by_key(|(idx, _)| *idx);
+            let output_items: Vec<Value> = indexed_output_items
+                .into_iter()
+                .map(|(_, item)| item)
+                .collect();
             let usage = stream_usage.unwrap_or_default();
             debug!("cache(stream): {}", usage.cache_summary());
 
