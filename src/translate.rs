@@ -204,8 +204,17 @@ pub fn to_chat_request(
         }
     }
 
+    let mapped_model = map_model_name(&req.model);
+    // GLM/Zhipu only emits reasoning_content when `thinking` is explicitly
+    // enabled; its default auto-thinking is suppressed by heavy agent system
+    // prompts (e.g. Codex). Other providers (DeepSeek/Kimi) think by default and
+    // must not receive this field, so it stays GLM-gated to preserve their
+    // request shape. See GitHub issue #26.
+    let enable_glm_thinking =
+        is_glm_like_model(&req.model) || is_glm_like_model(&mapped_model);
+
     ChatRequest {
-        model: map_model_name(&req.model),
+        model: mapped_model,
         messages,
         tools: convert_tools(&req.tools),
         temperature: req.temperature,
@@ -213,8 +222,18 @@ pub fn to_chat_request(
         stream_options: req.stream.then_some(ChatStreamOptions {
             include_usage: true,
         }),
+        thinking: enable_glm_thinking.then(|| ChatThinking {
+            kind: "enabled".into(),
+        }),
         stream: req.stream,
     }
+}
+
+/// Whether a model name looks like a GLM/Zhipu reasoning model that needs the
+/// explicit `thinking` switch to emit reasoning_content.
+fn is_glm_like_model(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.contains("glm") || m.contains("zhipu") || m.contains("bigmodel")
 }
 
 /// Map model names via `CODEX_RELAY_MODEL_MAP` env var.

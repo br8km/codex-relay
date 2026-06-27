@@ -434,6 +434,88 @@ async fn streaming_response_usage_includes_cached_tokens() {
 }
 
 #[tokio::test]
+async fn issue_26_glm_model_enables_thinking_on_upstream_request() {
+    // GLM suppresses default auto-thinking under heavy agent prompts, so the
+    // relay must send `thinking:{type:"enabled"}` for GLM-like models — otherwise
+    // no reasoning_content is ever produced and there is nothing to translate.
+    let (upstream_port, bodies) = spawn_mock_upstream().await;
+    let relay = Relay::spawn(&format!("http://127.0.0.1:{upstream_port}/v1"));
+
+    let _ = post_stream_completed(
+        &relay,
+        json!({"model": "glm-5.2", "input": "hi", "tools": [], "stream": true}),
+    )
+    .await;
+
+    let body = bodies.lock().unwrap().last().cloned().expect("upstream body");
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "enabled"}),
+        "GLM request must enable thinking"
+    );
+}
+
+#[tokio::test]
+async fn issue_26_non_glm_model_does_not_send_thinking() {
+    // DeepSeek/Kimi/etc. think by default and may reject unknown fields, so the
+    // request shape for non-GLM models must be unchanged.
+    let (upstream_port, bodies) = spawn_mock_upstream().await;
+    let relay = Relay::spawn(&format!("http://127.0.0.1:{upstream_port}/v1"));
+
+    let _ = post_stream_completed(
+        &relay,
+        json!({"model": "deepseek-reasoner", "input": "hi", "tools": [], "stream": true}),
+    )
+    .await;
+
+    let body = bodies.lock().unwrap().last().cloned().expect("upstream body");
+    assert!(
+        body.get("thinking").is_none(),
+        "non-GLM request must not include thinking: {body}"
+    );
+}
+
+#[tokio::test]
+async fn issue_26_streaming_reasoning_alias_field_emits_reasoning_events() {
+    // Some providers (OpenRouter/Together-style, newer GLM-5 deployments) stream
+    // thinking under `delta.reasoning` rather than `delta.reasoning_content`.
+    let reasoning_sse = sse_from_chunks(vec![
+        json!({"choices":[{"delta":{"role":"assistant","reasoning":"alias "}}]}),
+        json!({"choices":[{"delta":{"reasoning":"path"}}]}),
+        json!({"choices":[{"delta":{"content":"OK"}}]}),
+        json!({"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":3,"total_tokens":12}}),
+    ]);
+    let (upstream_port, _bodies) = spawn_mock_upstream_with_responses(vec![reasoning_sse]).await;
+    let relay = Relay::spawn(&format!("http://127.0.0.1:{upstream_port}/v1"));
+
+    let events = post_stream_events(
+        &relay,
+        json!({"model": "mock-model", "input": "Reason briefly.", "tools": [], "stream": true}),
+    )
+    .await;
+
+    let deltas: Vec<&Value> = events
+        .iter()
+        .filter_map(|(event, data)| {
+            (event == "response.reasoning_summary_text.delta").then_some(data)
+        })
+        .collect();
+    assert_eq!(deltas.len(), 2);
+    assert_eq!(deltas[0]["delta"], "alias ");
+    assert_eq!(deltas[1]["delta"], "path");
+
+    let completed = events
+        .iter()
+        .find_map(|(event, data)| (event == "response.completed").then_some(data))
+        .expect("response.completed");
+    assert_eq!(completed["response"]["output"][0]["type"], "reasoning");
+    assert_eq!(
+        completed["response"]["output"][0]["summary"],
+        json!([{"type": "summary_text", "text": "alias path"}])
+    );
+}
+
+#[tokio::test]
 async fn issue_26_streaming_reasoning_content_emits_responses_reasoning_events() {
     let reasoning_sse = sse_from_chunks(vec![
         json!({"choices":[{"delta":{"role":"assistant","reasoning_content":"think "}}]}),

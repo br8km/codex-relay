@@ -110,6 +110,7 @@ pub fn translate_stream(
 
         let mut accumulated_text = String::new();
         let mut accumulated_reasoning = String::new();
+        let mut reasoning_chunks: usize = 0;
         let mut tool_calls: BTreeMap<usize, ToolCallAccum> = BTreeMap::new();
         let mut reasoning_output_index: Option<usize> = None;
         let mut message_output_index: Option<usize> = None;
@@ -138,9 +139,12 @@ pub fn translate_stream(
                                 stream_usage = usage;
                             }
                             for choice in &choices {
-                                // Reasoning/thinking content (kimi-k2.6 etc.)
-                                if let Some(rc) = choice.delta.reasoning_content.as_deref() {
+                                // Reasoning/thinking content (kimi-k2.6, GLM, etc.).
+                                // Field name varies by provider (reasoning_content
+                                // vs reasoning) — normalized via reasoning_text().
+                                if let Some(rc) = choice.delta.reasoning_text() {
                                     if !rc.is_empty() {
+                                        reasoning_chunks += 1;
                                         let output_index = match reasoning_output_index {
                                             Some(idx) => idx,
                                             None => {
@@ -278,6 +282,13 @@ pub fn translate_stream(
         debug!(
             "← upstream stream function_calls={}",
             summarize_stream_tool_call_names(&tool_calls)
+        );
+        // Counts only (never the reasoning text) so issue #26 can be diagnosed:
+        // distinguishes "upstream sent no reasoning" from "received but not translated".
+        debug!(
+            "← upstream stream reasoning chunks={} bytes={}",
+            reasoning_chunks,
+            accumulated_reasoning.len()
         );
 
         for (rel_idx, (_, tc)) in tool_calls.iter().enumerate() {
