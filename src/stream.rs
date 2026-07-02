@@ -130,6 +130,7 @@ pub fn translate_stream(
         let mut message_output_index: Option<usize> = None;
         let mut next_output_index: usize = 0;
         let mut stream_done = false;
+        let mut stream_err = false;
         let mut stream_usage: Option<ChatUsage> = None;
         let mut source = upstream.bytes_stream().eventsource();
 
@@ -137,6 +138,7 @@ pub fn translate_stream(
             match ev {
                 Err(e) => {
                     warn!("SSE parse error: {e}");
+                    stream_err = true;
                     break;
                 }
                 Ok(ev) if ev.data.trim() == "[DONE]" => {
@@ -358,6 +360,17 @@ pub fn translate_stream(
                 }).to_string()));
 
             fc_items.push((output_index, done_item));
+        }
+
+        // Some OpenAI-compatible providers (e.g. synthetic.new) close the SSE
+        // stream cleanly without emitting a terminating `[DONE]` line. If the
+        // stream ended without an error and we already received a full turn
+        // (text and/or tool calls), treat it as complete so the response is
+        // persisted and `response.completed` is emitted. A mid-stream error
+        // (stream_err) still discards the partial turn.
+        if !stream_done && !stream_err && (!accumulated_text.is_empty() || !tool_calls.is_empty()) {
+            warn!("stream ended without [DONE] but content was received — treating as complete");
+            stream_done = true;
         }
 
         if stream_done {

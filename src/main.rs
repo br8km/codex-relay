@@ -194,12 +194,14 @@ async fn main() -> Result<()> {
         .with_state(state.clone());
 
     let addr = format!("127.0.0.1:{}", args.port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    // Log the actual bound address so that `--port 0` (ephemeral port) reports
+    // the real port instead of `:0`.
     info!(
-        "codex-relay listening on {addr} → {}",
+        "codex-relay listening on {} → {}",
+        listener.local_addr()?,
         state.upstream.as_ref()
     );
-
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
 
     Ok(())
