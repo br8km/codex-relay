@@ -20,7 +20,6 @@ use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
-use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -34,13 +33,6 @@ fn fixture(name: &str) -> ResponsesRequest {
     p.push(name);
     let bytes = std::fs::read(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
     serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
-}
-
-fn pick_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
 }
 
 #[test]
@@ -225,6 +217,16 @@ fn sse_from_chunks(chunks: Vec<Value>) -> String {
     sse
 }
 
+fn sse_from_chunks_without_done(chunks: Vec<Value>) -> String {
+    let mut sse = String::new();
+    for chunk in chunks {
+        sse.push_str("data: ");
+        sse.push_str(&chunk.to_string());
+        sse.push_str("\n\n");
+    }
+    sse
+}
+
 fn default_ok_sse() -> String {
     sse_from_chunks(vec![
         json!({"choices":[{"delta":{"role":"assistant","content":"OK"}}]}),
@@ -239,7 +241,6 @@ async fn spawn_mock_upstream() -> (u16, Arc<Mutex<Vec<Value>>>) {
 async fn spawn_mock_upstream_with_responses(
     responses: Vec<String>,
 ) -> (u16, Arc<Mutex<Vec<Value>>>) {
-    let port = pick_port();
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let state = MockState {
         bodies: bodies.clone(),
@@ -249,9 +250,12 @@ async fn spawn_mock_upstream_with_responses(
         .route("/v1/models", get(models_handler))
         .route("/v1/chat/completions", post(chat_handler))
         .with_state(state);
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+    // Bind to port 0 and keep the listener so the OS-assigned port cannot be
+    // grabbed by a concurrently running test (avoids a bind/drop/rebind race).
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .expect("bind mock upstream");
+    let port = listener.local_addr().expect("mock upstream addr").port();
     tokio::spawn(async move {
         axum::serve(listener, app)
             .await
@@ -315,23 +319,64 @@ impl Relay {
     }
 
     fn spawn_with_env(upstream: &str, extra_env: &[(&str, &str)]) -> Self {
-        let port = pick_port();
         let mut command = Command::new(RELAY_BIN);
         command
-            .env("CODEX_RELAY_PORT", port.to_string())
+            // Bind an ephemeral port; the real port is read from the child's
+            // startup log. This avoids a bind/drop/rebind race where two
+            // concurrent tests could pick the same port.
+            .env("CODEX_RELAY_PORT", "0")
             .env("CODEX_RELAY_UPSTREAM", upstream)
             .env("CODEX_RELAY_API_KEY", "")
-            .env("RUST_LOG", "codex_relay=warn")
-            .stdout(Stdio::null())
+            .env("RUST_LOG", "codex_relay=info")
+            .stdout(Stdio::piped())
             .stderr(Stdio::null());
         for (key, value) in extra_env {
             command.env(key, value);
         }
-        let child = command.spawn().expect("spawn codex-relay");
+        let mut child = command.spawn().expect("spawn codex-relay");
 
+        let port = Self::read_listening_port(&mut child);
         let mut handle = Relay { child, port };
         handle.wait_ready();
         handle
+    }
+
+    /// Read the bound port from the relay's `listening on 127.0.0.1:PORT` log line.
+    ///
+    /// A background thread keeps draining stdout for the child's lifetime so the
+    /// pipe never fills (which would block the relay) and stays open (closing it
+    /// would kill the relay with SIGPIPE on its next log write).
+    fn read_listening_port(child: &mut Child) -> u16 {
+        use std::io::{BufRead, BufReader};
+        use std::sync::mpsc;
+        let stdout = child.stdout.take().expect("relay stdout");
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            let mut tx = Some(tx);
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                if let Some(sender) = tx.as_ref() {
+                    if let Some(rest) = line.split("listening on 127.0.0.1:").nth(1) {
+                        if let Some(port) = rest
+                            .split(|c: char| !c.is_ascii_digit())
+                            .next()
+                            .and_then(|s| s.parse::<u16>().ok())
+                        {
+                            let _ = sender.send(port);
+                            tx = None;
+                        }
+                    }
+                }
+            }
+        });
+        rx.recv_timeout(Duration::from_secs(8))
+            .expect("relay did not report a listening port")
     }
 
     fn wait_ready(&mut self) {
@@ -519,6 +564,37 @@ async fn issue_26_non_glm_model_does_not_send_thinking() {
     assert!(
         body.get("thinking").is_none(),
         "non-GLM request must not include thinking: {body}"
+    );
+}
+
+#[tokio::test]
+async fn issue_31_stream_without_done_still_completes_when_content_received() {
+    // Some OpenAI-compatible providers (e.g. synthetic.new) close the SSE stream
+    // cleanly without ever sending a terminating `[DONE]` line. A turn that
+    // received content should still complete rather than be discarded.
+    let no_done_sse = sse_from_chunks_without_done(vec![
+        json!({"choices":[{"delta":{"role":"assistant","content":"Hello"}}]}),
+        json!({"choices":[{"delta":{"content":" world"}}]}),
+        json!({"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}),
+    ]);
+    let (upstream_port, _bodies) = spawn_mock_upstream_with_responses(vec![no_done_sse]).await;
+    let relay = Relay::spawn(&format!("http://127.0.0.1:{upstream_port}/v1"));
+
+    let events = post_stream_events(
+        &relay,
+        json!({"model": "mock-model", "input": "Say hi.", "tools": [], "stream": true}),
+    )
+    .await;
+
+    let completed = events
+        .iter()
+        .find_map(|(event, data)| (event == "response.completed").then_some(data));
+    let failed = events.iter().any(|(event, _)| event == "response.failed");
+    assert!(!failed, "stream should not fail when content was received");
+    let completed = completed.expect("response.completed");
+    assert_eq!(
+        completed["response"]["output"][0]["content"][0]["text"],
+        "Hello world"
     );
 }
 
