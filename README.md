@@ -81,6 +81,8 @@ input_modalities = ["text"]
 | `--port` | `CODEX_RELAY_PORT` | `4444` | Listen port |
 | `--upstream` | `CODEX_RELAY_UPSTREAM` | `https://openrouter.ai/api/v1` | Upstream Chat Completions base URL |
 | `--api-key` | `CODEX_RELAY_API_KEY` | _(empty)_ | API key forwarded to upstream |
+| `--upstream-extra-params` | `CODEX_RELAY_UPSTREAM_EXTRA_PARAMS` | _(empty)_ | JSON object merged into each upstream Chat Completions request |
+| `--drop-upstream-params` | `CODEX_RELAY_DROP_PARAMS` | _(empty)_ | JSON array of top-level upstream request parameters to remove |
 | `--model-map` | `CODEX_RELAY_MODEL_MAP` | _(empty)_ | Comma-separated `source:target` model name translations |
 | `--print-config` | _(none)_ | — | Print a Codex config snippet with `model_properties` and exit |
 | `--session-ttl-hours` | `CODEX_RELAY_SESSION_TTL_HOURS` | `168` | Retain idle `previous_response_id` history and reasoning state for this many hours |
@@ -102,6 +104,19 @@ input_modalities = ["text"]
 
 Any OpenAI-compatible endpoint works.
 
+### Upstream request parameters
+
+Some providers expose non-standard Chat Completions parameters. You can merge
+top-level JSON fields into every upstream request, and optionally drop generated
+top-level fields before the merge. For example, to disable DeepSeek V4
+thinking/reasoning mode:
+
+```bash
+CODEX_RELAY_UPSTREAM_EXTRA_PARAMS='{"thinking":{"type":"disabled"}}' \
+CODEX_RELAY_DROP_PARAMS='["reasoning_effort"]' \
+codex-relay --upstream https://api.deepseek.com/v1 --api-key "$DEEPSEEK_API_KEY"
+```
+
 ## Features
 
 - **Streaming** — full SSE streaming with correct event sequencing
@@ -118,6 +133,8 @@ Any OpenAI-compatible endpoint works.
 | `CODEX_RELAY_PORT` | `4444` | Port to listen on |
 | `CODEX_RELAY_UPSTREAM` | `https://openrouter.ai/api/v1` | Upstream Chat Completions base URL |
 | `CODEX_RELAY_API_KEY` | _(empty)_ | API key forwarded to upstream |
+| `CODEX_RELAY_UPSTREAM_EXTRA_PARAMS` | _(empty)_ | JSON object merged into each upstream Chat Completions request body |
+| `CODEX_RELAY_DROP_PARAMS` | _(empty)_ | JSON array of top-level upstream request parameter names to remove before forwarding |
 | `CODEX_RELAY_MODEL_MAP` | _(empty)_ | Comma-separated `source:target` model name translations (e.g., `gpt-5.4:deepseek-v4-pro`) |
 | `CODEX_RELAY_TOOL_DENYLIST` | _(empty)_ | Comma-separated tool names to remove before forwarding tools to the upstream model |
 | `CODEX_RELAY_SESSION_TTL_HOURS` | `168` | Retain idle session/reasoning state for this many hours |

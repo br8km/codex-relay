@@ -2,6 +2,7 @@ mod session;
 mod stream;
 mod translate;
 mod types;
+mod upstream_request;
 
 use anyhow::{bail, Result};
 use axum::{
@@ -17,6 +18,7 @@ use session::{SessionStore, DEFAULT_MAX_SESSIONS, DEFAULT_MAX_SESSION_BYTES, DEF
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tracing::{debug, error, info, warn};
 use types::*;
+use upstream_request::UpstreamRequestConfig;
 
 const DEBUG_NAME_LIMIT: usize = 80;
 
@@ -38,6 +40,14 @@ struct Args {
 
     #[arg(long, env = "CODEX_RELAY_API_KEY", default_value = "")]
     api_key: String,
+
+    /// JSON object merged into every upstream Chat Completions request body.
+    #[arg(long, env = "CODEX_RELAY_UPSTREAM_EXTRA_PARAMS")]
+    upstream_extra_params: Option<String>,
+
+    /// JSON array of top-level upstream request parameter names to remove.
+    #[arg(long, env = "CODEX_RELAY_DROP_PARAMS")]
+    drop_upstream_params: Option<String>,
 
     /// Print a ready-to-use Codex config.toml snippet (including model_properties)
     /// for all models exposed by the upstream provider.
@@ -87,6 +97,7 @@ struct AppState {
     client: Client,
     upstream: Arc<Url>,
     api_key: Arc<String>,
+    upstream_request: Arc<UpstreamRequestConfig>,
 }
 
 #[tokio::main]
@@ -101,6 +112,10 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     let upstream = validate_upstream(&args.upstream)?;
+    let upstream_request = Arc::new(UpstreamRequestConfig::from_raw(
+        args.upstream_extra_params.as_deref(),
+        args.drop_upstream_params.as_deref(),
+    )?);
 
     let client = Client::new();
     let api_key = Arc::new(args.api_key);
@@ -144,6 +159,7 @@ async fn main() -> Result<()> {
         client: client.clone(),
         upstream: Arc::new(upstream.clone()),
         api_key: api_key.clone(),
+        upstream_request: upstream_request.clone(),
     };
     info!(
         "session retention: store={} dir={} ttl={}h max_sessions={} max_session_memory={} MiB",
@@ -153,6 +169,13 @@ async fn main() -> Result<()> {
         args.max_sessions,
         args.max_session_memory_mb
     );
+    if !upstream_request.is_empty() {
+        info!(
+            "upstream request params: extra={} drop={}",
+            upstream_request.extra_param_count(),
+            upstream_request.drop_param_count()
+        );
+    }
 
     // Fetch upstream model list asynchronously for user visibility
     tokio::spawn(log_upstream_models(client, Arc::new(upstream), api_key));
@@ -580,6 +603,7 @@ async fn handle_responses_inner(state: AppState, req: ResponsesRequest) -> Respo
             url,
             api_key: state.api_key,
             chat_req,
+            upstream_request: state.upstream_request,
             response_id,
             sessions: state.sessions,
             request_messages,
@@ -702,7 +726,15 @@ async fn handle_blocking(
         builder = builder.bearer_auth(state.api_key.as_str());
     }
 
-    match builder.json(&chat_req).send().await {
+    let upstream_body = match state.upstream_request.request_body(&chat_req) {
+        Ok(body) => body,
+        Err(e) => {
+            error!("upstream request body error: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
+
+    match builder.json(&upstream_body).send().await {
         Err(e) => {
             error!("upstream error: {e}");
             (StatusCode::BAD_GATEWAY, e.to_string()).into_response()

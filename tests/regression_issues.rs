@@ -311,16 +311,23 @@ impl Drop for Relay {
 
 impl Relay {
     fn spawn(upstream: &str) -> Self {
+        Self::spawn_with_env(upstream, &[])
+    }
+
+    fn spawn_with_env(upstream: &str, extra_env: &[(&str, &str)]) -> Self {
         let port = pick_port();
-        let child = Command::new(RELAY_BIN)
+        let mut command = Command::new(RELAY_BIN);
+        command
             .env("CODEX_RELAY_PORT", port.to_string())
             .env("CODEX_RELAY_UPSTREAM", upstream)
             .env("CODEX_RELAY_API_KEY", "")
             .env("RUST_LOG", "codex_relay=warn")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn codex-relay");
+            .stderr(Stdio::null());
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        let child = command.spawn().expect("spawn codex-relay");
 
         let mut handle = Relay { child, port };
         handle.wait_ready();
@@ -341,6 +348,36 @@ impl Relay {
     fn url(&self, path: &str) -> String {
         format!("http://127.0.0.1:{}{}", self.port, path)
     }
+}
+
+#[tokio::test]
+async fn issue_29_extra_and_drop_params_modify_streaming_upstream_request() {
+    let (upstream_port, bodies) = spawn_mock_upstream().await;
+    let relay = Relay::spawn_with_env(
+        &format!("http://127.0.0.1:{upstream_port}/v1"),
+        &[
+            (
+                "CODEX_RELAY_UPSTREAM_EXTRA_PARAMS",
+                r#"{"thinking":{"type":"disabled"}}"#,
+            ),
+            ("CODEX_RELAY_DROP_PARAMS", r#"["stream_options"]"#),
+        ],
+    );
+
+    let _ = post_stream_completed(
+        &relay,
+        json!({"model": "glm-5.2", "input": "hi", "tools": [], "stream": true}),
+    )
+    .await;
+
+    let body = bodies
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("upstream body");
+    assert_eq!(body["thinking"], json!({"type": "disabled"}));
+    assert!(body.get("stream_options").is_none(), "body: {body}");
 }
 
 #[tokio::test]
