@@ -14,6 +14,7 @@ use crate::{
     session::SessionStore,
     translate::{response_function_name_for_responses, NamespaceToolMap},
     types::{ChatMessage, ChatRequest, ChatStreamChunk, ChatUsage},
+    upstream_request::UpstreamRequestConfig,
 };
 
 pub struct StreamArgs {
@@ -21,6 +22,7 @@ pub struct StreamArgs {
     pub url: String,
     pub api_key: Arc<String>,
     pub chat_req: ChatRequest,
+    pub upstream_request: Arc<UpstreamRequestConfig>,
     pub response_id: String,
     pub sessions: SessionStore,
     /// The fully translated request messages (including replayed history).
@@ -66,6 +68,7 @@ pub fn translate_stream(
         url,
         api_key,
         chat_req,
+        upstream_request,
         response_id,
         sessions,
         request_messages,
@@ -88,7 +91,18 @@ pub fn translate_stream(
             builder = builder.bearer_auth(api_key.as_str());
         }
 
-        let upstream = match builder.json(&chat_req).send().await {
+        let upstream_body = match upstream_request.request_body(&chat_req) {
+            Ok(body) => body,
+            Err(e) => {
+                error!("upstream request body error: {e}");
+                yield Ok(Event::default().event("response.failed").data(
+                    json!({"type": "response.failed", "response": {"id": &response_id, "status": "failed", "error": {"code": "request_body_error", "message": e.to_string()}}}).to_string()
+                ));
+                return;
+            }
+        };
+
+        let upstream = match builder.json(&upstream_body).send().await {
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
                 let status = r.status();
