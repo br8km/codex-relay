@@ -33,3 +33,15 @@ pin-project-lite = "0.2"
 eventsource-stream = "0.2"
 async-stream = "0.3"
 tokio-stream = "0.1"
+
+[profile.dev]
+incremental = true
+codegen-units = 256 # More units = faster, but less optimized binary
+debug = 0 # 0 or 1 for faster build
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# panic = "abort"
+strip = true
