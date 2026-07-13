@@ -9,9 +9,6 @@ Codex CLI speaks the OpenAI Responses API, which is an OpenAI-proprietary statef
 ## Install
 
 ```bash
-# From PyPI — prebuilt binary for your platform
-pip install codex-relay
-
 # From crates.io
 cargo install codex-relay
 ```
@@ -146,17 +143,7 @@ codex-relay --upstream https://api.deepseek.com/v1 --api-key "$DEEPSEEK_API_KEY"
 | `CODEX_RELAY_HISTORY_STORE` | `memory` | Retained history backend: `memory` or `disk` |
 | `CODEX_RELAY_HISTORY_DIR` | `.codex-relay-history` | Directory for disk-backed history records |
 | `CODEX_RELAY_RECORD_CORPUS` | _(off)_ | Directory to append per-turn conversation records (OpenAI messages JSONL); off unless set |
-| `RUST_LOG` | `codex_relay=info` | Log verbosity |
-
-## Python API
-
-```python
-from codex_relay import start
-
-proc = start(port=4446, upstream="https://api.deepseek.com/v1", api_key="sk-...")
-# ... use Codex ...
-proc.terminate()
-```
+| `RUST_LOG` | `codex_relay=info` | Rust log filter target (`codex_relay` is the Rust crate/logging target) |
 
 ## Testing
 
@@ -168,6 +155,7 @@ live tests pin behavior against real provider APIs.
 For tool-routing issues, enable debug logs:
 
 ```bash
+# `codex_relay` is the Rust logging target.
 RUST_LOG=codex_relay=debug codex-relay
 ```
 

@@ -33,6 +33,7 @@ pub enum ResponsesInput {
     Messages(Vec<Value>),
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Clone, Serialize)]
 pub struct ContentPart {
     #[serde(rename = "type")]

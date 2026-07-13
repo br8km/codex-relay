@@ -829,7 +829,9 @@ async fn handle_blocking(
                         &full_history,
                     );
                 }
-                state.sessions.save_with_id(response_id.clone(), full_history);
+                state
+                    .sessions
+                    .save_with_id(response_id.clone(), full_history);
 
                 let (resp, _) = if namespace_tools.is_empty() && custom_tools.is_empty() {
                     translate::from_chat_response(response_id, &model, chat_resp)
